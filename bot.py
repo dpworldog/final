@@ -731,7 +731,37 @@ class VPSManagementView(discord.ui.View):
             cursor.execute('UPDATE vps_instances SET status = "active" WHERE vm_id = ?', (self.vm_id,))
             bot.db.conn.commit()
             
-            embed = create_razor_embed(f"VPS {self.vm_id} Started ✅", "Your VPS is now running", 0x00FF00)
+            # Wait for container to be fully started
+            await asyncio.sleep(10)
+            
+            # Generate NEW tmate session for the started VPS
+            tmate_result = await bot.proxmox.create_container_tmate_session(self.vm_id)
+            
+            embed = create_razor_embed(f"VPS {self.vm_id} Started ✅", "Your VPS is now running with NEW tmate session", 0x00FF00)
+            
+            if tmate_result["success"]:
+                embed.add_field(
+                    name="🔑 NEW SSH Access (Read-Write)", 
+                    value=f"```{tmate_result['ssh_rw']}```",
+                    inline=False
+                )
+                embed.add_field(
+                    name="👀 NEW SSH Access (Read-Only)", 
+                    value=f"```{tmate_result['ssh_ro']}```",
+                    inline=False
+                )
+                embed.add_field(
+                    name="🌐 NEW Web Terminal", 
+                    value=f"[Click Here]({tmate_result['web_url']})",
+                    inline=True
+                )
+            else:
+                embed.add_field(
+                    name="⚠️ Tmate Session", 
+                    value="Failed to create tmate session. VPS is running but no SSH access available.",
+                    inline=False
+                )
+            
             await interaction.edit_original_response(embed=embed, view=self)
         else:
             embed = create_razor_embed(f"Start Failed ❌", f"Error: {result.stderr}", 0xFF0000)
@@ -755,7 +785,12 @@ class VPSManagementView(discord.ui.View):
             cursor.execute('UPDATE vps_instances SET status = "stopped" WHERE vm_id = ?', (self.vm_id,))
             bot.db.conn.commit()
             
-            embed = create_razor_embed(f"VPS {self.vm_id} Stopped ⏹️", "Your VPS has been stopped", 0xFFD700)
+            embed = create_razor_embed(f"VPS {self.vm_id} Stopped ⏹️", "Your VPS has been stopped. Start it again to get a new tmate session.", 0xFFD700)
+            embed.add_field(
+                name="ℹ️ Note", 
+                value="When you start this VPS again, you'll get a fresh tmate session with new SSH credentials.",
+                inline=False
+            )
             await interaction.edit_original_response(embed=embed, view=self)
         else:
             embed = create_razor_embed(f"Stop Failed ❌", f"Error: {result.stderr}", 0xFF0000)
@@ -788,6 +823,53 @@ class VPSManagementView(discord.ui.View):
         else:
             embed = create_razor_embed(f"Status Check Failed ❌", f"Error: {result.stderr}", 0xFF0000)
             await interaction.edit_original_response(embed=embed, view=self)
+    
+    @discord.ui.button(label="🔄 New Tmate", style=discord.ButtonStyle.primary)
+    async def new_tmate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You can only manage your own VPS.", ephemeral=True)
+            return
+        
+        await interaction.response.defer()
+        
+        # Check if VPS is running first
+        import subprocess
+        status_result = subprocess.run(['pct', 'status', str(self.vm_id)], capture_output=True, text=True, timeout=10)
+        
+        if status_result.returncode != 0 or 'running' not in status_result.stdout:
+            embed = create_razor_embed(f"VPS {self.vm_id} Not Running ❌", "VPS must be running to generate tmate session", 0xFF0000)
+            await interaction.edit_original_response(embed=embed, view=self)
+            return
+        
+        # Generate NEW tmate session
+        tmate_result = await bot.proxmox.create_container_tmate_session(self.vm_id)
+        
+        if tmate_result["success"]:
+            embed = create_razor_embed(f"VPS {self.vm_id} - NEW Tmate Session ✅", "Fresh tmate session generated", 0x00FF00)
+            embed.add_field(
+                name="🔑 NEW SSH Access (Read-Write)", 
+                value=f"```{tmate_result['ssh_rw']}```",
+                inline=False
+            )
+            embed.add_field(
+                name="👀 NEW SSH Access (Read-Only)", 
+                value=f"```{tmate_result['ssh_ro']}```",
+                inline=False
+            )
+            embed.add_field(
+                name="🌐 NEW Web Terminal", 
+                value=f"[Click Here]({tmate_result['web_url']})",
+                inline=True
+            )
+        else:
+            embed = create_razor_embed(f"Tmate Generation Failed ❌", "Failed to create new tmate session", 0xFF0000)
+            embed.add_field(
+                name="Error", 
+                value=tmate_result.get("note", "Unknown error"),
+                inline=False
+            )
+        
+        await interaction.edit_original_response(embed=embed, view=self)
     
     @discord.ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
     async def back_to_list(self, interaction: discord.Interaction, button: discord.ui.Button):
